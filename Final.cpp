@@ -86,6 +86,7 @@ void setProximityColor(const float &front, const float &left,
   const float CLOSE = 10.0;
   const float FAR = 30.0;
 
+  ledStrip.clear();
   if (PROXIMITY < CLOSE) { // Too Close, red
     setStripColor(255, 0, 0);
   } else if (PROXIMITY > FAR) { // Too Far, blue
@@ -93,7 +94,6 @@ void setProximityColor(const float &front, const float &left,
   } else { // Good, green
     setStripColor(0, 255, 0);
   }
-  ledStrip.clear();
   ledStrip.show();
 }
 
