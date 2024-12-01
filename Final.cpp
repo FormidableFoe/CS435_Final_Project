@@ -1,113 +1,265 @@
-#include "mbed.h"
-#include "LCDi2c.h"
+#include <Adafruit_NeoPixel.h>
+#include <LiquidCrystal_I2C.h>
 
-// Ultra sonic left
-DigitalOut trigPinLeft(D13);  // Trigger pin
-DigitalIn echoPinLeft(D12);   // Echo pin
+// Define pins for ultrasonic sensors
+#define TRIG_LEFT 8
+#define ECHO_LEFT 9
+#define TRIG_FRONT 10
+#define ECHO_FRONT 11
+#define TRIG_RIGHT 12
+#define ECHO_RIGHT 13
 
-// Ultra sonic right
-DigitalOut trigPinRight(D11);  // Trigger pin
-DigitalIn echoPinRight(D10);   // Echo pin
+// Define LED strip pins and settings
+#define LED_PIN 6
+#define NUM_LEDS 150 // Total number of LEDs
+#define START_ACTIVE 23 // Starting index for active LEDs
+#define END_ACTIVE 65   // Ending index for active LEDs
+#define NUM_SEGMENTS 3  // Number of segments (left, front, right)
 
-// Ultra sonic front
-DigitalOut trigPinFront(D9);  // Trigger pin
-DigitalIn echoPinFront(D8);   // Echo pin
+#define SOUND_SPEED_INCHES 13503.9f
+#define GREEN_COLOR 0x00FF00
+#define YELLOW_COLOR 0xFFFF00
+#define RED_COLOR 0xFF0000
+#define OFF_COLOR 0x000000
 
-// BufferedSerial replaces Serial in newer Mbed versions
-BufferedSerial pc(USBTX, USBRX, 115200);  // USB serial transmission at 115200 baud
+Adafruit_NeoPixel strip(NUM_LEDS, LED_PIN, NEO_GRB + NEO_KHZ800);
+LiquidCrystal_I2C lcd(0x27, 20, 4);
 
-// Timer to measure the pulse duration
-Timer timer;
+bool backlightOn = true;
 
-// Speed of sound in air (13503.9 inches/s)
-const float SOUND_SPEED_INCHES_PER_SEC = 13503.9f;
+// Calculate the size of each segment
+const int segmentSize = (END_ACTIVE - START_ACTIVE + 1) / NUM_SEGMENTS;
+const int separatorIndex1 = START_ACTIVE + segmentSize;       // First separator index
+const int separatorIndex2 = START_ACTIVE + 2 * segmentSize;   // Second separator index
 
-#define I2C_SDA_PIN D14
-#define I2C_SCL_PIN D15
+// Warning distances for color changes
+const float RED_WARNING_DISTANCE = 2; 
+const float YELLOW_WARNING_DISTANCE = 3;
+const float FRONT_ACTIVATE_DISTANCE = 10;
 
-//I2C i2c(I2C_SDA, I2C_SCL);  // Define I2C pins
-//I2C i2c(I2C_SDA_PIN, I2C_SCL_PIN);
-LCDi2c lcd(I2C_SDA_PIN, I2C_SCL_PIN, LCD20x4, 0x27);  // Try other addresses if needed
+// Averaging parameters
+const int NUM_SAMPLES = 20; // Number of samples to average
+float leftSamples[NUM_SAMPLES] = {0};
+float frontSamples[NUM_SAMPLES] = {0};
+float rightSamples[NUM_SAMPLES] = {0};
+int sampleIndex = 0; // Circular buffer index
 
-// gets the distance by sending out a pulse
-// returns a float in inches
-float send_pulse(DigitalOut trigPin, DigitalIn echoPin)
+
+
+
+// Function prototypes
+float getDistance(int trigPin, int echoPin);
+void clearLEDs();
+uint32_t getLEDColor(float distance);
+float getAverage(float samples[]);
+void updateLEDSegment(int start, int end, float distance);
+void updateLEDSegments(float left, float front, float right);
+void serialOutput(float left, float front, float right);
+void lcdOutput(float left, float front, float right);
+
+
+
+
+// Function to determine LED color based on distance
+uint32_t getLEDColor(float distance) 
 {
-    trigPin = 0;
-    ThisThread::sleep_for(2ms);  // Sleep for 2ms
-    trigPin = 1;
-    wait_us(10);  // Send 10us pulse
-    trigPin = 0;
-
-    // Wait for echo signal to go high
-    while (echoPin == 0);
-
-    // Start timer when echo goes high
-    timer.start();
-
-    // Wait for echo signal to go low
-    while (echoPin == 1);
-
-    // Stop timer when echo goes low
-    timer.stop();
-
-    // Calculate the time of the pulse (in microseconds)
-    auto pulse_duration_us = chrono::duration_cast<chrono::microseconds>(timer.elapsed_time()).count();
-    timer.reset();
-
-    float distance_in_inches = (pulse_duration_us / 2.0f) * (SOUND_SPEED_INCHES_PER_SEC / 1000000.0f);
-    return distance_in_inches;
+  if (distance < RED_WARNING_DISTANCE) 
+  {
+    return RED_COLOR; // Red for critical distance
+  } else if (distance < YELLOW_WARNING_DISTANCE) 
+  {
+    return YELLOW_COLOR; // Yellow for warning distance
+  } else 
+  {
+    return GREEN_COLOR; // Green for safe distance
+  }
 }
 
-// Print function for serial output
-void print(const char* label, float value) 
+void setup() 
 {
-    printf("%s: %.2f\n", label, value);
+  Serial.begin(115200);
+
+  // Initialize ultrasonic sensors
+  pinMode(TRIG_LEFT, OUTPUT);
+  pinMode(ECHO_LEFT, INPUT);
+  pinMode(TRIG_FRONT, OUTPUT);
+  pinMode(ECHO_FRONT, INPUT);
+  pinMode(TRIG_RIGHT, OUTPUT);
+  pinMode(ECHO_RIGHT, INPUT);
+
+  // Initialize LED strip
+  strip.begin();
+  //strip.setBrightness(25); // Set brightness to 10%
+  strip.show();
+
+  // Initialize LCD
+  lcd.init();
+  lcd.backlight();
+
+  lcd.setCursor(0, 0);
+  lcd.print("Setup complete");
+  Serial.println("Setup complete");
+  
+  delay(2000);
 }
 
-
-int main() 
+// Function to calculate distance
+float getDistance(int trigPin, int echoPin) 
 {
+  digitalWrite(trigPin, LOW);
+  delayMicroseconds(2);
+  digitalWrite(trigPin, HIGH);
+  delayMicroseconds(10);
+  digitalWrite(trigPin, LOW);
 
-    printf("Before\n");
-    parseI2C();
-    printf("After\n");
-	//lcd.display(DISPLAY_OFF);
-	//lcd.display(BACKLIGHT_OFF);
-    // Initialize the LCD
-    lcd.cls();  // Clear the display
-    lcd.locate(0, 0);  // Set cursor to the first line
-    lcd.printf("Hello World!");  // Print "Hello World!" on the first line
-	lcd.character(0, 1, 0);
-	lcd.character(3, 1, 1);
-	lcd.character(5, 1, 2);
-	lcd.character(7, 1, 3);
+  unsigned long timeout = micros() + 30000; // Timeout to avoid hanging
 
+  while (digitalRead(echoPin) == LOW) 
+  {
+    if (micros() > timeout) return -1;
+  }
 
-        ThisThread::sleep_for(10s);  
-    while (true) 
+  unsigned long startTime = micros();
+  while (digitalRead(echoPin) == HIGH) 
+  {
+    if (micros() > timeout) return -1;
+  }
+  unsigned long duration = micros() - startTime;
+
+   // Duration = there and back time so div by 2
+   // div speed of sound by 1,000,000 since duration is in microseconds
+  float distance = (duration / 2.0) * (SOUND_SPEED_INCHES / 1000000.0);
+
+  return distance;
+}
+
+// Function to calculate the average of a sample array
+float getAverage(float samples[]) 
+{
+  float sum = 0;
+
+  for (int i = 0; i < NUM_SAMPLES; i++) 
+  {
+    sum += samples[i];
+  }
+
+  return sum / NUM_SAMPLES;
+}
+
+void clearLEDs()
+{
+  // Clear all LEDs
+  for (int i = 0; i < NUM_LEDS; i++) 
+  {
+    strip.setPixelColor(i, OFF_COLOR);
+  }
+
+}
+
+// Function to update LED segment based on distance
+void updateLEDSegment(int start, int end, float distance) 
+{
+  uint32_t color = getLEDColor(distance);
+
+  for (int i = start; i <= end; i++) 
+  {
+    strip.setPixelColor(i, color);
+  }
+}
+
+void updateLEDSegments(float left, float front, float right)
+{
+  clearLEDs();
+
+  // Update active LED segments if front sensor detects within activation distance
+  if (front < FRONT_ACTIVATE_DISTANCE) 
+  {
+    updateLEDSegment(START_ACTIVE, separatorIndex1 - 1, right);   // Right LEDs
+    updateLEDSegment(separatorIndex1 + 1, separatorIndex2 - 1, front); // Front LEDs
+    updateLEDSegment(separatorIndex2 + 1, END_ACTIVE, left);  // Left LEDs
+  }
+
+  // Set separator LEDs to OFF
+  strip.setPixelColor(separatorIndex1, OFF_COLOR); // Between left and front
+  strip.setPixelColor(separatorIndex2, OFF_COLOR); // Between front and right
+  
+  strip.show(); // Apply changes to the LED strip
+}
+
+void serialOutput(float left, float front, float right)
+{
+  Serial.print("Left: ");
+  Serial.print(left);
+  Serial.print(" in, Front: ");
+  Serial.print(front);
+  Serial.print(" in, Right: ");
+  Serial.print(right);
+  Serial.println(" in");
+}
+
+// Display distances on LCD
+void lcdOutput(float left, float front, float right)
+{
+  if (front < FRONT_ACTIVATE_DISTANCE) 
+  {
+    if (!backlightOn)
     {
-        // Measure distances
-        float front = send_pulse(trigPinFront, echoPinFront);
-        float left  = send_pulse(trigPinLeft, echoPinLeft);
-        float right = send_pulse(trigPinRight, echoPinRight);
+      lcd.backlight();
+      backlightOn = true;
 
-        // Print distances to Serial
-        print("Front", front);
-        print("Left", left);
-        print("Right", right);
-        printf("\n");
-
-        // Display distances on LCD
-        lcd.locate(0, 1);  // Second line
-        lcd.printf("Front: %.2f in", front);
-
-        lcd.locate(0, 2);  // Third line
-        lcd.printf("Left:  %.2f in", left);
-
-        lcd.locate(0, 3);  // Fourth line
-        lcd.printf("Right: %.2f in", right);
-
-        ThisThread::sleep_for(1s);  // Sleep for 1 second before next measurement
+      //Line 1
+      lcd.setCursor(0, 0);
+      lcd.print("Distance Sensors");
     }
+
+    //Line 2
+    lcd.setCursor(0, 1);
+    lcd.print("Left:  ");
+    lcd.print(left, 1); // rounds to 1 decimal
+    lcd.print(" in    ");
+
+    //Line 3
+    lcd.setCursor(0, 2);
+    lcd.print("Front: ");
+    lcd.print(front, 1); // rounds to 1 decimal
+    lcd.print(" in    ");
+
+    //Line 4
+    lcd.setCursor(0, 3);
+    lcd.print("Right: ");
+    lcd.print(right, 1); // rounds to 1 decimal
+    lcd.print(" in    ");
+  }
+  else if (backlightOn) // only turn off if 
+  {
+    lcd.noBacklight();
+    lcd.clear();
+    backlightOn = false;
+  }
+}
+
+void loop() 
+{
+  frontSamples[sampleIndex] = getDistance(TRIG_FRONT, ECHO_FRONT); // Read current distance
+  float frontDistance = getAverage(frontSamples); // Calculate averages to smooth outliers
+
+  leftSamples[sampleIndex] = getDistance(TRIG_LEFT, ECHO_LEFT);
+  float leftDistance = getAverage(leftSamples);
+
+  rightSamples[sampleIndex] = getDistance(TRIG_RIGHT, ECHO_RIGHT);
+  float rightDistance = getAverage(rightSamples);
+
+  // Move to the next sample index
+  sampleIndex = (sampleIndex + 1) % NUM_SAMPLES;  
+
+  // Print distances to Serial Monitor
+  serialOutput(leftDistance, frontDistance, rightDistance);
+
+  // Print distances to LCD
+  lcdOutput(leftDistance, frontDistance, rightDistance);
+
+  // Display proper LED's
+  updateLEDSegments(leftDistance, frontDistance, rightDistance);
+
+  delay(50);
 }
